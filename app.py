@@ -50,6 +50,8 @@ from utils.torch_utils import select_device, TracedModel
 from PasseportTun import run_PassTN
 #from orientation import get_orientation
 from sanct import check_sanction
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+
 sys.stdout.reconfigure(encoding='utf-8')
 
 def is_json(myjson):
@@ -63,6 +65,12 @@ def is_json(myjson):
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False
 
+request_counter = Counter('http_requests_total', 'Total number of HTTP requests')
+error_counter = Counter('http_request_errors_total', 'Total number of HTTP request errors')
+
+# Create a histogram to measure the duration of HTTP requests
+request_duration = Histogram('http_request_duration_seconds', 'HTTP request duration in seconds')
+
 
 
 valid_key = '9e739eee1f931bd4abfb1d59ad3f9442'
@@ -70,54 +78,53 @@ def is_valid_api_key(api_key):
     # Remplacez 'votre_clé_api_enregistree' par votre propre clé API enregistrée
     return api_key == valid_key
 
-def process_image(input_image_path,card_type,response_data):
+def process_image(input_image_path, card_type, response_data):
     try:
-        with app.app_context(): 
+        with app.app_context():
+            request_counter.inc()
 
-        # Appeler le script detect_and_crop.py en tant que sous-processus
+            # Record the duration of the request
+            start_time = time.time()
+
+            # Appeler le script detect_and_crop.py en tant que sous-processus
             process = subprocess.Popen(
-                ["python", "detect_and_crop1.py", "--img-size","640", '--source', input_image_path , "--conf", "0.4", "--weights", "best.pt"],
+                ["python", "detect_and_crop1.py", "--img-size", "640", '--source', input_image_path, "--conf", "0.4",
+                 "--weights", "best.pt"],
                 stdout=subprocess.PIPE
             )
             process.wait()
 
-        # Lire la sortie du processus
+            # Lire la sortie du processus
             output = process.stdout.read().decode('utf-8')
 
-        # Utiliser une expression régulière pour extraire le texte du tenseur
+            # Utiliser une expression régulière pour extraire le texte du tenseur
             start_index = output.find('[[')
             end_index = output.find(']]', start_index)
 
-        # Extraire le texte du tenseur
+            # Extraire le texte du tenseur
             tensor_text = output[start_index:end_index + 2]
             if tensor_text:
                 try:
-                # Évaluer le texte du tenseur en tant que liste de listes
+                    # Évaluer le texte du tenseur en tant que liste de listes
                     tensor_data = ast.literal_eval(tensor_text)
 
-                # Convertir la liste de listes en un tenseur torch
+                    # Convertir la liste de listes en un tenseur torch
                     pred = torch.tensor(tensor_data)
 
                     detected_cards = []
                     for *xyxy, conf, cls in pred:
                         if conf > 0.4:
                             xyxy_np = np.array(xyxy)
-                            if (0 <= int(cls) <= 4) or (int(cls) == 8) or (int(cls) == 9)  :
-                                detected_cards.append({"type": "recto", "class": int(cls), "coordinates": xyxy_np.tolist()})
-                            elif (5 <= int(cls) <= 7) or (5 <= int(cls) == 10) :
-                                detected_cards.append({"type": "verso", "class": int(cls), "coordinates": xyxy_np.tolist()})
+                            if (0 <= int(cls) <= 4) or (int(cls) == 8) or (int(cls) == 9):
+                                detected_cards.append(
+                                    {"type": "recto", "class": int(cls), "coordinates": xyxy_np.tolist()})
+                            elif (5 <= int(cls) <= 7) or (5 <= int(cls) == 10):
+                                detected_cards.append(
+                                    {"type": "verso", "class": int(cls), "coordinates": xyxy_np.tolist()})
 
-        
-        #path = detect_id_card(input_image_path)
-
-        #detected_cards = []
-
-        #with open(path, "r") as f:
-         #   detected_cards = json.load(f)
-        
                     output = []
                     combined_info = {}
-        
+
                     for card in detected_cards:
                         card_type = card["type"]
                         card_class = card["class"]
@@ -169,8 +176,6 @@ def process_image(input_image_path,card_type,response_data):
                                     print(f"An error occurred during SejourAncien processing: {e}")
                                     return jsonify({"error": "Error during SejourAncien processing"})
 
-        
-        
                         elif card_type == "verso":
                             if card_class == 5:
                                 try:
@@ -184,14 +189,14 @@ def process_image(input_image_path,card_type,response_data):
                                 except Exception as e:
                                     print(f"An error occurred during TitreSejourFRVerso processing: {e}")
                                     return jsonify({"error": "Error during TitreSejourFRVerso processing"})
-                            elif card_class == 7 :
+                            elif card_class == 7:
                                 try:
                                     card_info.update(run_verso_one(input_image_path, card_coordinates))
                                 except Exception as e:
                                     print(f"An error occurred during CINFRVerso processing: {e}")
                                     return jsonify({"error": "Error during CINFRVerso processing"})
-                        
-                            elif card_class == 10 :
+
+                            elif card_class == 10:
                                 try:
                                     card_info.update(run_sejourAncienVerso(input_image_path, card_coordinates))
                                 except Exception as e:
@@ -199,26 +204,23 @@ def process_image(input_image_path,card_type,response_data):
                                     return jsonify({"error": "Error during SejourFrAncienVerso processing"})
                         combined_info.update(card_info)
                     output.append(combined_info)
-                    #os.remove(input_image_path)
+                    # os.remove(input_image_path)
                     response_data.update(combined_info)
+                    request_duration.observe(time.time() - start_time)
 
-                    return response_data, card_class
+                    return response_data,card_class
                 except Exception as e:
                     print(f"An error in the image format: {e}")
                     return jsonify({"error": "Error in the image format"})
 
-    
-    
-    
-     
-    
-            else :
+            else:
                 os.remove(input_image_path)
                 return jsonify({"error": "Error in the image format"})
-        
+
     except Exception as e:
         print(f"An error occurred during image processing: {e}")
         return jsonify({"error": "Error during image processing"})
+
     
 
 #loaded_model = keras.models.load_model('My_Model.h5')
@@ -540,8 +542,10 @@ def kyc():
         return render_template('index.html', response_data=response_data)
         
 
-    
-
+# Route for Prometheus metrics
+@app.route('/metrics')
+def metrics():
+    return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', debug=True, port=5000)

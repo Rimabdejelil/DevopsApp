@@ -10,7 +10,7 @@ def check_sanction(nom, prenom, date_naissance, nationalite):
     }
 
     # Envoyer la requête à l'API
-    api_url = "https://sanctions.tledger.tech/search"
+    api_url = "https://sanctionsapp.azurewebsites.net/search"
     response = requests.post(api_url, json=data)
 
     if response.status_code == 200:
